@@ -8,6 +8,7 @@ import {
 import { getProviderConnections, getCombos, getCustomModels, getModelAliases } from "@/lib/localDb";
 import { getDisabledModels } from "@/lib/disabledModelsDb";
 import { resolveKiroModels } from "open-sse/services/kiroModels.js";
+import { resolveKimchiModels } from "open-sse/services/kimchiModels.js";
 import { resolveQoderModels } from "open-sse/services/qoderModels.js";
 import { resolveCopilotModels } from "open-sse/services/copilotModels.js";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
@@ -44,6 +45,14 @@ const LIVE_MODEL_RESOLVERS = {
     return {
       models: result.models.map((m) => ({ id: m.id, name: m.name })),
     };
+  },
+  kimchi: async (conn) => {
+    const result = await resolveKimchiModels({
+      accessToken: conn.accessToken,
+      apiKey: conn.apiKey,
+      providerSpecificData: conn.providerSpecificData || {}
+    }, { log: console });
+    return result?.models?.length ? { models: result.models } : null;
   },
   github: async (conn) => {
     const result = await resolveCopilotModels({
@@ -163,7 +172,6 @@ export async function buildModelsList(kindFilter) {
   }
 
   if (connections.length === 0) {
-    // DB unavailable -> return static models, filtered by per-model kind
     const aliasToProviderId = Object.fromEntries(
       Object.entries(PROVIDER_ID_TO_ALIAS).map(([id, alias]) => [alias, id])
     );
@@ -183,7 +191,6 @@ export async function buildModelsList(kindFilter) {
 
     for (const customModel of customModels) {
       if (!customModel?.id || (customModel.type && customModel.type !== "llm")) continue;
-      // Custom models without active connection are LLM-only by current schema
       if (!kindFilter.includes(LLM_KIND)) continue;
       const providerAlias = customModel.providerAlias;
       if (!providerAlias) continue;
@@ -299,9 +306,10 @@ export async function buildModelsList(kindFilter) {
       const mergedModelIds = Array.from(new Set([...modelIds, ...customModelIds, ...aliasModelIds]));
 
       for (const modelId of mergedModelIds) {
-        // Resolve kind: prefer static/custom metadata, otherwise infer from ID heuristics
+        // Resolve kind: prefer custom/live metadata, then static, then ID heuristics.
         const customKind = customModelKindById.get(modelId);
-        const kind = staticModelKindById.get(modelId) || customKind || inferKindFromUnknownModelId(modelId);
+        const liveMeta = liveModelMetadataById.get(modelId);
+        const kind = customKind || liveMeta?.kind || staticModelKindById.get(modelId) || inferKindFromUnknownModelId(modelId);
         // imageToText custom models stay in the LLM list (vision-capable chat models)
         const allowAsLlm = kind === "imageToText" && kindFilter.includes(LLM_KIND);
         if (!kindFilter.includes(kind) && !allowAsLlm) continue;
@@ -312,7 +320,7 @@ export async function buildModelsList(kindFilter) {
           object: "model",
           owned_by: outputAlias,
         };
-        const caps = liveModelMetadataById.get(modelId)?.capabilities
+        const caps = liveMeta?.capabilities
           || capabilitiesFromServiceKind(customKind)
           || runtimeCapabilitiesForModel(providerId, modelId);
         if (caps) model.capabilities = caps;
