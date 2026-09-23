@@ -55,6 +55,7 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
 
   if (!chunk.choices?.length) return [];
 
+
   const events = [];
   const nextSeq = () => ++state.seq;
   
@@ -71,6 +72,7 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
   if (!state.started) {
     state.started = true;
     state.responseId = chunk.id ? `resp_${chunk.id}` : state.responseId;
+    state.model = chunk.model || state.model || MODEL_FALLBACK;
     
     emit("response.created", {
       type: "response.created",
@@ -78,6 +80,7 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
         id: state.responseId,
         object: "response",
         created_at: state.created,
+        model: state.model,
         status: "in_progress",
         background: false,
         error: null,
@@ -91,6 +94,7 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
         id: state.responseId,
         object: "response",
         created_at: state.created,
+        model: state.model,
         status: "in_progress"
       }
     });
@@ -141,7 +145,11 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
     }
   }
 
-  // Handle finish_reason
+  // Handle finish_reason: close every open item, but DO NOT emit
+  // response.completed yet. OpenAI-compatible upstreams (OpenRouter included)
+  // send the terminal usage in a separate choices-less chunk AFTER this one, so
+  // completing here would publish zeroed tokens. flushEvents() emits the single
+  // terminal event once usage has been captured (or estimated).
   if (choice.finish_reason) {
     for (const i in state.msgItemAdded) closeMessage(state, emit, i);
     closeReasoning(state, emit);
@@ -402,7 +410,8 @@ function closeToolCall(state, emit, idx) {
         type: custom ? RESPONSES_ITEM.CUSTOM_TOOL_CALL : RESPONSES_ITEM.FUNCTION_CALL,
         ...(custom ? { input: extractCustomToolInput(args) } : { arguments: args }),
         call_id: callId,
-        name: state.funcNames[idx] || ""
+        name: state.funcNames[idx] || "",
+        status: "completed"
       }
     });
 
@@ -420,9 +429,11 @@ function sendCompleted(state, emit) {
         id: state.responseId,
         object: "response",
         created_at: state.created,
+        model: state.model || MODEL_FALLBACK,
         status: "completed",
         background: false,
         error: null,
+        incomplete_details: null,
         ...(state.responsesUsage ? { usage: state.responsesUsage } : {})
       }
     });
