@@ -1,4 +1,67 @@
-import { ERROR_TYPES, DEFAULT_ERROR_MESSAGES } from "../config/errorConfig.js";
+import {
+  ERROR_TYPES,
+  DEFAULT_ERROR_MESSAGES,
+  TRANSIENT_STREAM_ERROR_PATTERNS,
+} from "../config/errorConfig.js";
+
+// Bounds how many nested JSON envelopes an error message may hide behind.
+const MAX_MESSAGE_UNWRAP_DEPTH = 4;
+
+/**
+ * Reduce any upstream error payload to the plain-text message a client can show.
+ *
+ * Upstreams hand back errors in wildly different shapes: nested `{ error: {...} }`,
+ * flat `{ message, type, code }`, or a *stringified* copy of either (double-encoded
+ * by a relay). Forwarding the raw JSON leaves clients with an unclassifiable
+ * "unknown error" blob, so unwrap to the innermost message instead.
+ *
+ * @param {unknown} value - Parsed error body, message string, or nested fragment
+ * @param {number} [depth] - Internal recursion guard
+ * @returns {string} Plain-text message, or "" when nothing readable was found
+ */
+export function normalizeErrorMessage(value, depth = 0) {
+  if (value === null || value === undefined) return "";
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return "";
+    // Double-encoded payloads start with a JSON brace/bracket — try to unwrap.
+    if (depth < MAX_MESSAGE_UNWRAP_DEPTH && (trimmed.startsWith("{") || trimmed.startsWith("["))) {
+      try {
+        const nested = normalizeErrorMessage(JSON.parse(trimmed), depth + 1);
+        if (nested) return nested;
+      } catch { /* plain text that merely starts with a brace */ }
+    }
+    return trimmed;
+  }
+
+  if (typeof value !== "object") return String(value);
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const nested = normalizeErrorMessage(item, depth + 1);
+      if (nested) return nested;
+    }
+    return "";
+  }
+
+  for (const key of ["message", "error", "detail", "description", "reason"]) {
+    const nested = normalizeErrorMessage(value[key], depth + 1);
+    if (nested) return nested;
+  }
+  return "";
+}
+
+/**
+ * True when the text describes an upstream transport/stream failure (dropped
+ * hop) rather than a problem with the request or the credential. Provider codes
+ * vary, so match provider-agnostically against shared patterns.
+ */
+export function isTransientStreamError(text) {
+  if (!text) return false;
+  const lower = String(text).toLowerCase();
+  return TRANSIENT_STREAM_ERROR_PATTERNS.some((pattern) => lower.includes(pattern));
+}
 
 /**
  * Build OpenAI-compatible error response body
@@ -81,22 +144,19 @@ export async function parseUpstreamError(response, executor = null) {
     try {
       const parsed = executor.parseError(response, bodyText);
       if (parsed && typeof parsed === "object") {
-        const msg = parsed.message || DEFAULT_ERROR_MESSAGES[response.status] || `Upstream error: ${response.status}`;
+        // Executors may hand back the raw body (base.parseError) or a
+        // double-encoded message — unwrap to text before it reaches the client.
+        const msg = normalizeErrorMessage(parsed.message)
+          || DEFAULT_ERROR_MESSAGES[response.status]
+          || `Upstream error: ${response.status}`;
         return { statusCode: parsed.status || response.status, message: msg, resetsAtMs: parsed.resetsAtMs };
       }
     } catch { /* fall through to default parsing */ }
   }
 
-  let message = "";
-  try {
-    const json = JSON.parse(bodyText);
-    message = json.error?.message || json.message || json.error || bodyText;
-  } catch {
-    message = bodyText;
-  }
-
-  const messageStr = typeof message === "string" ? message : JSON.stringify(message);
-  const finalMessage = messageStr || DEFAULT_ERROR_MESSAGES[response.status] || `Upstream error: ${response.status}`;
+  const finalMessage = normalizeErrorMessage(bodyText)
+    || DEFAULT_ERROR_MESSAGES[response.status]
+    || `Upstream error: ${response.status}`;
 
   return { statusCode: response.status, message: finalMessage };
 }
@@ -120,9 +180,18 @@ export function createErrorResult(statusCode, message, resetsAtMs, accountStatus
   };
 }
 
-/** Map nonstandard upstream statuses to broadly retryable client statuses. */
-export function getClientErrorStatus(statusCode) {
-  return statusCode === 400 || statusCode === 524 ? 502 : statusCode;
+/**
+ * Map nonstandard upstream statuses to broadly retryable client statuses.
+ * A transport/stream failure is transient regardless of the status the upstream
+ * happened to report (some answer 200 with an error body), so those surface as
+ * 502 — the client retries instead of failing on an unclassifiable error.
+ * @param {number} statusCode - Upstream status
+ * @param {string} [message] - Parsed upstream error message
+ */
+export function getClientErrorStatus(statusCode, message = "") {
+  if (statusCode === 400 || statusCode === 524) return 502;
+  if (isTransientStreamError(message)) return 502;
+  return statusCode;
 }
 
 /**

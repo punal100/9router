@@ -518,7 +518,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     // Provider request errors are retryable from Kilo's perspective after the
     // router has exhausted its own retry. Keep the original status for logs
     // and account classification, but expose 502 so the client retries.
-    const clientStatusCode = getClientErrorStatus(statusCode);
+    const clientStatusCode = getClientErrorStatus(statusCode, message);
     return createErrorResult(clientStatusCode, errMsg, resetsAtMs, statusCode);
   }
 

@@ -9,6 +9,7 @@ import { buildUsage } from "../concerns/usage.js";
 import { fallbackToolCallId } from "../concerns/toolCall.js";
 import { reasoningDelta, extractReasoningText } from "../concerns/reasoning.js";
 import { ROLE, OPENAI_BLOCK, RESPONSES_ITEM, OPENAI_FINISH, MODEL_FALLBACK } from "../schema/index.js";
+import { normalizeResponsesErrorEvent } from "../../utils/responsesStreamHelpers.js";
 
 /**
  * Translate OpenAI chunk to Responses API events
@@ -637,7 +638,9 @@ export function openaiResponsesToOpenAIResponse(chunk, state) {
     // Avoid emitting duplicate errors (error + response.failed arrive back-to-back)
     if (state.finishReasonSent) return null;
 
-    const error = data.error || data.response?.error;
+    // Upstreams also report errors flat ({ message, type, code }) or double-encoded;
+    // canonicalizing first keeps those from being dropped as unrecognized payloads.
+    const error = normalizeResponsesErrorEvent(data).error || data.response?.error;
     if (error) {
       state.error = error;
       state.finishReasonSent = true;

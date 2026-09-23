@@ -3,7 +3,7 @@ import { FORMATS } from "../translator/formats.js";
 import { trackPendingRequest, appendRequestLog } from "@/lib/usageDb.js";
 import { extractUsage, mergeUsage, hasValidUsage, estimateUsage, logUsage, addBufferToUsage, filterUsageForFormat, COLORS } from "./usageTracking.js";
 import { parseSSELine, hasValuableContent, fixInvalidId, formatSSE } from "./streamHelpers.js";
-import { getOpenAIResponsesEventName, isOpenAIResponsesTerminalEvent, formatIncompleteOpenAIResponsesStreamFailure } from "./responsesStreamHelpers.js";
+import { getOpenAIResponsesEventName, isOpenAIResponsesTerminalEvent, formatIncompleteOpenAIResponsesStreamFailure, normalizeResponsesErrorEvent } from "./responsesStreamHelpers.js";
 import { dbg, isDebugEnabled } from "./debugLog.js";
 
 import { SSE_DONE, SSE_HEADERS, SSE_HEADERS_NO_BUFFER } from "./sseConstants.js";
@@ -143,11 +143,22 @@ export function createSSEStream(options = {}) {
           let injectedUsage = false;
           let responsesTerminal = false;
 
-          if (trimmed.startsWith("data:") && trimmed.slice(5).trim() !== "[DONE]") {
-            try {
-              const parsed = JSON.parse(trimmed.slice(5).trim());
+        if (trimmed.startsWith("data:") && trimmed.slice(5).trim() !== "[DONE]") {
+          try {
+            const parsed = JSON.parse(trimmed.slice(5).trim());
 
-              const idFixed = fixInvalidId(parsed);
+            const idFixed = fixInvalidId(parsed);
+
+            // Upstreams report mid-stream errors in shapes clients cannot
+            // classify — flat `{ message, type, code }` (or a stringified copy),
+            // most often on Responses-speaking openai-compatible providers.
+            // Canonicalize to the nested error envelope before forwarding.
+            const normalizedError = normalizeResponsesErrorEvent(parsed);
+            let errorNormalized = false;
+            if (normalizedError !== parsed) {
+              Object.assign(parsed, normalizedError);
+              errorNormalized = true;
+            }
 
               // Ensure OpenAI-required fields are present on streaming chunks (Letta compat)
               let fieldsInjected = false;
@@ -219,10 +230,10 @@ export function createSSEStream(options = {}) {
                 parsed.usage = filterUsageForFormat(buffered, FORMATS.OPENAI);
                 output = `data: ${JSON.stringify(parsed)}\n`;
                 injectedUsage = true;
-              } else if (idFixed || fieldsInjected) {
-                output = `data: ${JSON.stringify(parsed)}\n`;
-                injectedUsage = true;
-              }
+          } else if (idFixed || fieldsInjected || errorNormalized) {
+            output = `data: ${JSON.stringify(parsed)}\n`;
+            injectedUsage = true;
+          }
             } catch {
               // Skip non-JSON data lines silently — don't forward garbage to clients.
               // Upstream providers sometimes return plain-text errors (HTML, rate-limit
@@ -328,7 +339,8 @@ export function createSSEStream(options = {}) {
 
         // Responses same-format passthrough: re-emit with original event framing
         if (keepsOpenAIResponsesFormat && openAIResponsesEventName) {
-          const output = formatSSE({ event: openAIResponsesEventName, data: parsed }, sourceFormat);
+          const passthroughData = normalizeResponsesErrorEvent(parsed);
+          const output = formatSSE({ event: openAIResponsesEventName, data: passthroughData }, sourceFormat);
           reqLogger?.appendConvertedChunk?.(output);
           controller.enqueue(sharedEncoder.encode(output));
           currentOpenAIResponsesEvent = null;
