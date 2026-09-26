@@ -16,7 +16,7 @@ import { resolveSessionId } from "../utils/sessionManager.js";
 import { stripCodexUnsupportedPatterns } from "../utils/codexToolSchema.js";
 
 // SSE error patterns inside 200-OK bodies. Some retry same account first; capacity rotates accounts.
-// Pattern lists are shared with the rest of the router (config/errorConfig.js) so a
+// The lists are shared with the rest of the router (config/errorConfig.js) so a
 // transport failure reported with any provider's wording is still classified as
 // transient instead of streaming through to the client as an unknown error.
 const CODEX_SSE_RETRY_PATTERNS = TRANSIENT_STREAM_ERROR_PATTERNS;

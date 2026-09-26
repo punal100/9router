@@ -113,6 +113,71 @@ export async function writeStreamError(writer, statusCode, message) {
   await writer.write(encoder.encode(`data: ${JSON.stringify(errorBody)}\n\n`));
 }
 
+// Error `type` values providers use on error bodies. Kept explicit (rather than
+// "any object with a type") so success payloads are never mistaken for failures.
+const ERROR_TYPE_HINTS = new Set([
+  "error",
+  "upstream_error",
+  "server_error",
+  "api_error",
+  "invalid_request_error",
+  "authentication_error",
+  "permission_error",
+  "not_found_error",
+  "rate_limit_error",
+  "overloaded_error",
+  "service_unavailable_error",
+]);
+
+/**
+ * Detect an error payload that arrived with a *success* status.
+ *
+ * Relays and gateways answer 200 OK while the body carries the failure, so the
+ * status alone cannot be trusted. Without this the body is forwarded as if it
+ * were a completion, and the client shows an unclassifiable error (the reported
+ * `UnknownError` with a JSON blob in `message`).
+ *
+ * @param {unknown} payload - Parsed response body
+ * @returns {{ message: string, code?: string, type?: string } | null}
+ */
+export function detectErrorBody(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+
+  // Never override a real completion body.
+  if (Array.isArray(payload.choices) && payload.choices.length > 0) return null;
+  if (payload.object === "response" && Array.isArray(payload.output)) return null;
+  if (Array.isArray(payload.content) && payload.role) return null;
+
+  // A relay may double-encode the error: the payload is fine but its `message`
+  // holds a stringified copy of the real error object. Merge it back in.
+  let candidate = payload;
+  if (typeof payload.message === "string" && payload.message.trim().startsWith("{")) {
+    try {
+      const inner = JSON.parse(payload.message);
+      if (inner && typeof inner === "object" && !Array.isArray(inner)) {
+        candidate = { ...inner, ...payload, message: inner.message ?? payload.message };
+      }
+    } catch { /* plain text that merely starts with a brace */ }
+  }
+
+  const nested = candidate.error && typeof candidate.error === "object" ? candidate.error : null;
+  const isError = Boolean(nested)
+    || ERROR_TYPE_HINTS.has(candidate.type)
+    || (typeof candidate.message === "string" && typeof candidate.code === "string");
+  if (!isError) return null;
+
+  const message = normalizeErrorMessage(nested ?? candidate.message ?? candidate.error);
+  if (!message) return null;
+
+  const code = nested?.code || candidate.code;
+  const type = nested?.type || candidate.type;
+  return {
+    message,
+    ...(typeof code === "string" ? { code } : {}),
+    ...(typeof type === "string" ? { type } : {}),
+  };
+}
+
 /**
  * Parse upstream provider error response
  * @param {Response} response - Fetch response from provider

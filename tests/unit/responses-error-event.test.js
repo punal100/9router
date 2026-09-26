@@ -55,6 +55,9 @@ describe("normalizeResponsesErrorEvent", () => {
 
     expect(out.error.message).toBe("Upstream HTTP/2 stream failed");
     expect(out.error.code).toBe("upstream_http2_stream_error");
+    // The top-level message is replaced too — clients that read it must not get
+    // the raw JSON blob (the reported "UnknownError" payload).
+    expect(out.message).toBe("Upstream HTTP/2 stream failed");
   });
 
   it("leaves an already-canonical error untouched", () => {

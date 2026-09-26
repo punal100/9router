@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createErrorResult, getClientErrorStatus, parseUpstreamError, normalizeErrorMessage, isTransientStreamError } from "../../open-sse/utils/error.js";
+import { createErrorResult, getClientErrorStatus, parseUpstreamError, normalizeErrorMessage, isTransientStreamError, detectErrorBody } from "../../open-sse/utils/error.js";
 
 describe("createErrorResult", () => {
   it("can expose a retryable client status while preserving provider status", async () => {
@@ -64,8 +64,38 @@ describe("normalizeErrorMessage", () => {
   });
 });
 
-describe("isTransientStreamError", () => {
-  it("recognizes provider-agnostic transport failures", () => {
+describe("detectErrorBody", () => {
+  it("detects an error body delivered with a success status", () => {
+    // Reported shape: an openai-compatible relay answers 200 OK while the body
+    // carries the transport failure, so 9router used to forward it as a completion.
+    expect(detectErrorBody({
+      message: "Upstream HTTP/2 stream failed",
+      type: "upstream_error",
+      code: "upstream_http2_stream_error",
+    })).toEqual({
+      message: "Upstream HTTP/2 stream failed",
+      code: "upstream_http2_stream_error",
+      type: "upstream_error",
+    });
+  });
+
+  it("unwraps nested and double-encoded error bodies", () => {
+    expect(detectErrorBody({ error: { message: "quota exhausted", code: "rate_limit_error" } }))
+      .toEqual({ message: "quota exhausted", code: "rate_limit_error", type: undefined });
+    expect(detectErrorBody({ message: JSON.stringify({ message: "boom", code: "upstream_error" }) }))
+      .toMatchObject({ message: "boom", code: "upstream_error" });
+  });
+
+  it("never mistakes a completion for an error", () => {
+    expect(detectErrorBody({ choices: [{ message: { role: "assistant", content: "hi" } }] })).toBeNull();
+    expect(detectErrorBody({ object: "response", output: [{ type: "message" }] })).toBeNull();
+    expect(detectErrorBody({ role: "assistant", content: [{ type: "text", text: "hi" }] })).toBeNull();
+    expect(detectErrorBody(null)).toBeNull();
+    expect(detectErrorBody("plain text")).toBeNull();
+  });
+});
+
+describe("isTransientStreamError", () => {  it("recognizes provider-agnostic transport failures", () => {
     expect(isTransientStreamError("upstream_http2_stream_error")).toBe(true);
     expect(isTransientStreamError("Upstream HTTP/2 stream failed")).toBe(true);
     expect(isTransientStreamError("socket hang up")).toBe(true);

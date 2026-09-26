@@ -35,7 +35,8 @@ export function buildAbortedResponsesTerminalBytes() {
 // is `{ error: { message, type, code } }`, but upstreams also emit a flat
 // `{ message, type, code }` — or a stringified copy of one. Clients cannot
 // classify those, so they surface as an unknown error and never retry. Keep the
-// original fields and add the nested envelope when it is missing.
+// original fields, replace any JSON-blob message with plain text, and add the
+// nested envelope when it is missing.
 export function normalizeResponsesErrorEvent(payload) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
   if (payload.error && typeof payload.error === "object" && typeof payload.error.message === "string") {
@@ -62,6 +63,8 @@ export function normalizeResponsesErrorEvent(payload) {
 
   return {
     ...payload,
+    // Clients read the top-level message too — never hand them the raw blob.
+    message,
     error: {
       message,
       type: type || "upstream_error",
