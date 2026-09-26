@@ -9,6 +9,7 @@ import { buildUsage } from "../concerns/usage.js";
 import { fallbackToolCallId } from "../concerns/toolCall.js";
 import { reasoningDelta, extractReasoningText } from "../concerns/reasoning.js";
 import { ROLE, OPENAI_BLOCK, RESPONSES_ITEM, OPENAI_FINISH, MODEL_FALLBACK } from "../schema/index.js";
+import { normalizeResponsesErrorEvent } from "../../utils/responsesStreamHelpers.js";
 
 /**
  * Translate OpenAI chunk to Responses API events
@@ -55,6 +56,7 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
 
   if (!chunk.choices?.length) return [];
 
+
   const events = [];
   const nextSeq = () => ++state.seq;
   
@@ -71,6 +73,7 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
   if (!state.started) {
     state.started = true;
     state.responseId = chunk.id ? `resp_${chunk.id}` : state.responseId;
+    state.model = chunk.model || state.model || MODEL_FALLBACK;
     
     emit("response.created", {
       type: "response.created",
@@ -78,6 +81,7 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
         id: state.responseId,
         object: "response",
         created_at: state.created,
+        model: state.model,
         status: "in_progress",
         background: false,
         error: null,
@@ -91,6 +95,7 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
         id: state.responseId,
         object: "response",
         created_at: state.created,
+        model: state.model,
         status: "in_progress"
       }
     });
@@ -145,7 +150,11 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
     }
   }
 
-  // Handle finish_reason
+  // Handle finish_reason: close every open item, but DO NOT emit
+  // response.completed yet. OpenAI-compatible upstreams (OpenRouter included)
+  // send the terminal usage in a separate choices-less chunk AFTER this one, so
+  // completing here would publish zeroed tokens. flushEvents() emits the single
+  // terminal event once usage has been captured (or estimated).
   if (choice.finish_reason) {
     for (const i in state.msgItemAdded) closeMessage(state, emit, i);
     closeReasoning(state, emit);
@@ -411,7 +420,8 @@ function closeToolCall(state, emit, idx) {
       type: custom ? RESPONSES_ITEM.CUSTOM_TOOL_CALL : RESPONSES_ITEM.FUNCTION_CALL,
       ...(custom ? { input: extractCustomToolInput(args) } : { arguments: args }),
       call_id: callId,
-      name: state.funcNames[idx] || ""
+      name: state.funcNames[idx] || "",
+      status: "completed"
     };
 
     emit("response.output_item.done", {
@@ -460,10 +470,12 @@ function sendCompleted(state, emit) {
         id: state.responseId,
         object: "response",
         created_at: state.created,
+        model: state.model || MODEL_FALLBACK,
         status: "completed",
         background: false,
         error: null,
         output: collectCompletedOutputItems(state),
+        incomplete_details: null,
         ...(state.responsesUsage ? { usage: state.responsesUsage } : {})
       }
     });
@@ -667,7 +679,9 @@ export function openaiResponsesToOpenAIResponse(chunk, state) {
     // Avoid emitting duplicate errors (error + response.failed arrive back-to-back)
     if (state.finishReasonSent) return null;
 
-    const error = data.error || data.response?.error;
+    // Upstreams also report errors flat ({ message, type, code }) or double-encoded;
+    // canonicalizing first keeps those from being dropped as unrecognized payloads.
+    const error = normalizeResponsesErrorEvent(data).error || data.response?.error;
     if (error) {
       state.error = error;
       state.finishReasonSent = true;
