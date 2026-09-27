@@ -116,6 +116,7 @@ export const TRANSIENT_STREAM_ERROR_PATTERNS = [
   "http/2 stream failed",
   "http2 stream failed",
   "socket hang up",
+  "temporarily overloaded",
 ];
 
 /** In-band errors that mean the account/model is saturated → rotate accounts. */

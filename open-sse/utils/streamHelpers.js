@@ -137,7 +137,15 @@ export function formatSSE(data, sourceFormat) {
 // NOTE: non-SSE client formats (Ollama NDJSON) get an SSE frame here — dead in
 // practice because detectFormatByEndpoint never resolves to OLLAMA.
 export function buildStreamErrorBytes(statusCode, message, clientFormat) {
-  const { error } = buildErrorBody(statusCode, message);
+  const { error: built } = buildErrorBody(statusCode, message);
+
+  // OpenAI-compatible harnesses (Kilo CLI / opencode) only treat an in-stream
+  // error as retryable when the error object has a string message, no `type`
+  // field, and a numeric 4xx/5xx code. A string `type` blocks their envelope
+  // synthesis, so the failure surfaces as a non-retryable UnknownError.
+  const error = clientFormat === FORMATS.CLAUDE
+    ? built
+    : { message: built.message, code: statusCode };
 
   const sse = clientFormat === FORMATS.CLAUDE
     ? formatSSE({ type: "error", error }, FORMATS.CLAUDE)
