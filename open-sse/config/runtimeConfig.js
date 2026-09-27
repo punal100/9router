@@ -39,6 +39,14 @@ function envMs(name, def) {
   return Number.isFinite(n) && n > 0 ? n : def;
 }
 
+// Like envMs but accepts 0, for watchdogs that can be disabled outright.
+function envMsAllowingZero(name, def) {
+  const raw = process.env[name];
+  if (raw == null || raw === "") return def;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : def;
+}
+
 function envUrl(name, def) {
   const raw = process.env[name]?.trim();
   return raw || def;
@@ -57,6 +65,13 @@ export const STREAM_FIRST_CHUNK_TIMEOUT_MS = envMs("STREAM_FIRST_CHUNK_TIMEOUT_M
 
 // Fetch connect timeout: abort if upstream doesn't return response headers within this duration
 export const FETCH_CONNECT_TIMEOUT_MS = envMs("FETCH_CONNECT_TIMEOUT_MS", 60 * 1000);
+
+// Pre-flight SSE peek for openai-compatible providers: wait up to this long for
+// the first event. An error frame in it (relays/gateways stream one instead of a
+// response when overloaded) becomes a retryable 502, so account fallback and
+// client retry run before any bytes are sent. 0 disables the peek.
+// Env: SSE_PREFLIGHT_PEEK_TIMEOUT_MS.
+export const SSE_PREFLIGHT_PEEK_TIMEOUT_MS = envMsAllowingZero("SSE_PREFLIGHT_PEEK_TIMEOUT_MS", 1500);
 
 // Gemini native TTS fetch timeout: abort if Google does not return response headers in time.
 export const GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS = envMs("GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS", 45 * 1000);

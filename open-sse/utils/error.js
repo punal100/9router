@@ -163,7 +163,10 @@ export function detectErrorBody(payload) {
   const nested = candidate.error && typeof candidate.error === "object" ? candidate.error : null;
   const isError = Boolean(nested)
     || ERROR_TYPE_HINTS.has(candidate.type)
-    || (typeof candidate.message === "string" && typeof candidate.code === "string");
+    // Relays also report `{ message, code }` with a numeric HTTP-like code and no
+    // type; without this they were forwarded as if they were completions.
+    || (typeof candidate.message === "string"
+      && (typeof candidate.code === "string" || typeof candidate.code === "number"));
   if (!isError) return null;
 
   const message = normalizeErrorMessage(nested ?? candidate.message ?? candidate.error);
