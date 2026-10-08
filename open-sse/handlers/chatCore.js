@@ -10,7 +10,8 @@ import { getModelTargetFormat, getModelSupportedFormats, getModelStrip, getModel
 import { PROVIDERS } from "../config/providers.js";
 import { createErrorResult, getClientErrorStatus, parseUpstreamError, formatProviderError } from "../utils/error.js";
 import { upstreamResponseHeaders } from "../utils/upstreamHeaders.js";
-import { HTTP_STATUS, TOKEN_SAVER_HEADER } from "../config/runtimeConfig.js";
+import { HTTP_STATUS, TOKEN_SAVER_HEADER, STREAM_PRECONTENT_RETRY_ATTEMPTS, STREAM_PRECONTENT_RETRY_DELAY_MS } from "../config/runtimeConfig.js";
+import { withPreContentRetry } from "../utils/preContentRetry.js";
 import { handleBypassRequest } from "../utils/bypassHandler.js";
 import { trackPendingRequest, appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
 import { getExecutor } from "../executors/index.js";
@@ -398,6 +399,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // Most executors return their registry format. Cursor AgentService is an
   // exception: it is decoded by the executor into OpenAI-compatible output.
   let providerResponseFormat = targetFormat;
+  // Body of the attempt that produced providerResponse (pre-content retries resend it).
+  let sentBody = translatedBody;
   try {
     const result = await executor.execute({
       model,
@@ -426,6 +429,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       log?.warn?.("HEADROOM", "upstream rejected compressed Responses payload with 400; retrying once without Headroom");
       await providerResponse.body?.cancel?.();
       const fallbackResult = await executor.execute({ model, body: headroomFallbackBody, stream, credentials, providerSessionId: sessionSeed, clientTool, signal: streamController.signal, log, proxyOptions });
+      sentBody = headroomFallbackBody;
       providerResponse = fallbackResult.response;
       providerUrl = fallbackResult.url;
       providerHeaders = fallbackResult.headers;
@@ -555,7 +559,31 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     return result;
   }
 
-  // Streaming response
+  // Streaming response. Failures before any content (in-band overload/HTTP2
+  // frames, dropped sockets, empty EOF) are retried here with backoff, so the
+  // client never sees them; after content starts the stream is committed.
+  const upstreamIsSse = (providerResponse.headers.get("content-type") || "").toLowerCase().includes("text/event-stream");
+  if (upstreamIsSse) {
+    providerResponse = withPreContentRetry(providerResponse, {
+      attempts: STREAM_PRECONTENT_RETRY_ATTEMPTS,
+      delayMs: STREAM_PRECONTENT_RETRY_DELAY_MS,
+      signal: streamController.signal,
+      reexecute: async () => (await executor.execute({
+        model,
+        body: sentBody,
+        stream,
+        credentials,
+        providerSessionId: sessionSeed,
+        clientTool,
+        signal: streamController.signal,
+        log,
+        proxyOptions,
+        providerOverrides,
+      })).response,
+      onRetry: (msg) => log?.warn?.("STREAM", `${provider}/${model} · pre-content failure: ${msg}`),
+    });
+  }
+
   const { onStreamComplete, streamDetailId } = buildOnStreamComplete({ ...sharedCtx });
   return handleStreamingResponse({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, userAgent, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, credentials });
 }
